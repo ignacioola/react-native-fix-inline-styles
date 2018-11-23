@@ -15,6 +15,7 @@ let j
 const objects = {}
 const styleIds = {}
 const finalStyles = {}
+const usedIdsByNode = {}
 
 /**
  * Constants
@@ -31,30 +32,22 @@ module.exports = function(fileInfo, api) {
   const attributes = j(fileInfo.source).find(j.JSXAttribute)
 
   let source = attributes
-    .filter(isStyle)
+    .filter(isStyleAttribute)
     .forEach(function(attrPath) {
-      const element = attrPath.parent
+      const jsxNode = attrPath.parent
 
       j(attrPath)
         .find(j.ObjectExpression)
-        .filter(notSubObject)
+        .filter(isFirstLevelObject)
         .forEach(function(objPath) {
-          const parentType = objPath.parent.value.type
-
           try {
-            saveRef(objPath, element)
+            saveRef(objPath, jsxNode)
           } catch (err) {
-            const { valid, invalid } = splitStyles2(objPath)
-            if (valid.properties.length > 0) {
-              saveRef(valid, element)
+            const { parsed, notParsed } = splitStyles(objPath)
 
-              if (parentType === 'ArrayExpression') {
-                j(objPath).replaceWith(invalid)
-                objPath.parent.value.elements.push(valid)
-              } else {
-                const styleArray = j.arrayExpression([invalid, valid])
-                j(objPath).replaceWith(styleArray)
-              }
+            if (parsed.properties.length > 0) {
+              saveRef(parsed, jsxNode)
+              modifyStyle(objPath, [notParsed, parsed])
             }
           }
         })
@@ -63,12 +56,12 @@ module.exports = function(fileInfo, api) {
 
   const finalSource = j(source)
     .find(j.JSXAttribute)
-    .filter(isStyle)
+    .filter(isStyleAttribute)
     .forEach(function(path) {
       j(path)
         .find(j.ObjectExpression)
-        .filter(notSubObject)
-        .forEach(path => saveStyle(path))
+        .filter(isFirstLevelObject)
+        .forEach(path => fixStyle(path))
     })
     .toSource()
 
@@ -80,26 +73,29 @@ ${fixedStyleSource}
 }
 
 /**
- * Helpers
+ * Returns the id for a style
  */
 
 function getStyleId(data) {
-  const { nodeName, count } = data
+  const { ref, nodeName, count } = data
   const reused = count > 1
-  const name = _.camelCase(data.nodeName || 'node') + (reused ? 'Common' : '')
+  const name = _.camelCase(nodeName || 'node') + (reused ? 'Common' : '')
 
-  let idCount = (styleIds[name] || 0) + 1
-  styleIds[name] = idCount
+  if (!usedIdsByNode[name]) {
+    usedIdsByNode[name] = 0
+  }
 
+  usedIdsByNode[name]++
+
+  const nextIdIndex = usedIdsByNode[name]
   const commonCount = reused ? `_x${count}` : ''
-  const id = `${name}${idCount}${commonCount}`
+  const id = `${name}${nextIdIndex}${commonCount}`
 
   return id
 }
 
 /**
- *
- * @param {*} source
+ * Parse an object from it's source string
  */
 
 function parseObject(source) {
@@ -107,50 +103,57 @@ function parseObject(source) {
 }
 
 /**
- *
- * @param {*} j
- * @param {*} obj
+ * Splits a style at a path between the properties that are serializable and the one that access variables
  */
 
-function parseObjectExpression(obj) {
-  const properties = _.map(obj, (val, key) => {
-    return j.property('init', j.identifier(key), j.literal(val))
-  })
-
-  return j.objectExpression(properties)
-}
-
-/**
- *
- * @param {*} styleString
- */
-
-function splitStyles2(path) {
-  const valid = []
-  const invalid = []
+function splitStyles(path) {
+  const parsed = []
+  const notParsed = []
 
   path.node.properties.forEach(property => {
     if (property.value.type === 'Literal') {
-      valid.push(property)
+      parsed.push(property)
     } else {
-      invalid.push(property)
+      try {
+        eval(j(property.value).toSource())
+        parsed.push(property)
+      } catch (err) {
+        notParsed.push(property)
+      }
     }
   })
 
   return {
-    valid: j.objectExpression(valid),
-    invalid: j.objectExpression(invalid),
+    parsed: j.objectExpression(parsed),
+    notParsed: j.objectExpression(notParsed),
   }
 }
 
 /**
  *
- * @param {*} tag
- * @param {*} content
+ * @param {*} path
+ * @param {*} jsxNode
  */
 
-function saveRef(path, element) {
-  const nodeName = element.value.name.name
+function modifyStyle(objPath, styles) {
+  const parentType = objPath.parent.value.type
+
+  if (parentType === 'ArrayExpression') {
+    const [first, ...rest] = styles
+    j(objPath).replaceWith(first)
+    objPath.parent.value.elements.concat(rest)
+  } else {
+    const styleArray = j.arrayExpression(styles)
+    j(objPath).replaceWith(styleArray)
+  }
+}
+
+/**
+ * Save a reference and metadata for a given style
+ */
+
+function saveRef(path, jsxNode) {
+  const nodeName = jsxNode.value.name.name
   const styleSource = j(path).toSource()
   const styleObj = parseObject(styleSource)
   const ref = hash(styleObj)
@@ -171,7 +174,7 @@ function saveRef(path, element) {
 }
 
 /**
- * @param {*} styleSource
+ * Get a reference for the source object of a style
  */
 
 function getRef(styleSource) {
@@ -179,24 +182,30 @@ function getRef(styleSource) {
   return hash(styleObj)
 }
 
-function createObjectExpression(source) {
-  return j(`(${source})`)
-    .find(j.ObjectExpression)
-    .nodes()[0]
-}
+/**
+ * Check if a node is a style attribute
+ */
 
-function isStyle(path) {
+function isStyleAttribute(path) {
   const attrName = path.value.name.name
   return attrName === 'style'
 }
 
-function notSubObject(path) {
+/**
+ * Check if an object is nested within another object
+ */
+
+function isFirstLevelObject(path) {
   const parentType = path.parent.value.type
 
   return parentType !== 'Property'
 }
 
-function saveStyle(path) {
+/**
+ * Apply the fix to a style at a path
+ */
+
+function fixStyle(path) {
   const styleSource = j(path).toSource()
 
   try {
@@ -204,17 +213,22 @@ function saveStyle(path) {
     const data = objects[ref]
     const id = getStyleId(data)
     data.id = id
-    console.log('id', id)
     finalStyles[id] = data.style
 
     j(path).replaceWith(j.identifier(`${STYLES_OBJECT_VAR_NAME}.${id}`))
   } catch (err) {}
 }
 
+/**
+ * Get the final source to append fixed styles
+ */
+
 function getFixedStylesSource() {
   const styles = JSON.stringify(finalStyles, null, 2)
 
   return prettier.format(`const ${STYLES_OBJECT_VAR_NAME} = StyleSheet.create(${styles})`, {
     parser: 'babylon',
+    singleQuote: true,
+    trailingComma: 'es5',
   })
 }
