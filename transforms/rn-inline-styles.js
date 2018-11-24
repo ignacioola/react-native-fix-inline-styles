@@ -27,49 +27,38 @@ const STYLES_OBJECT_VAR_NAME = 'fixedStyles'
  * Main
  */
 
-module.exports = function(fileInfo, api) {
+module.exports = function(file, api) {
   j = api.jscodeshift
-  const attributes = j(fileInfo.source).find(j.JSXAttribute)
+  let source
 
-  let source = attributes
-    .filter(isStyleAttribute)
-    .forEach(function(attrPath) {
-      const jsxNode = attrPath.parent
-
-      j(attrPath)
-        .find(j.ObjectExpression)
-        .filter(isFirstLevelObject)
-        .forEach(function(objPath) {
-          try {
-            saveRef(objPath, jsxNode)
-          } catch (err) {
-            const { parsed, notParsed } = splitStyles(objPath)
-
-            if (parsed.properties.length > 0) {
-              saveRef(parsed, jsxNode)
-              modifyStyle(objPath, [notParsed, parsed])
-            }
-          }
-        })
-    })
+  // Split styles
+  source = j(file.source)
+    .find(j.JSXExpressionContainer)
+    .filter(hasStyleParent)
+    .forEach(splitStyleExpression)
     .toSource()
 
-  const finalSource = j(source)
-    .find(j.JSXAttribute)
-    .filter(isStyleAttribute)
-    .forEach(function(path) {
-      j(path)
-        .find(j.ObjectExpression)
-        .filter(isFirstLevelObject)
-        .forEach(path => fixStyle(path))
-    })
+  // Save references
+  source = j(source)
+    .find(j.JSXExpressionContainer)
+    .filter(hasStyleParent)
+    .find(j.ObjectExpression)
+    .filter(isFirstLevelObject)
+    .forEach(saveRef)
     .toSource()
 
-  const fixedStyleSource = getFixedStylesSource()
+  // Fix styles
+  source = j(source)
+    .find(j.JSXExpressionContainer)
+    .filter(hasStyleParent)
+    .find(j.ObjectExpression)
+    .filter(isFirstLevelObject)
+    .forEach(fixStyle)
+    .toSource()
 
-  return `${finalSource}
-${fixedStyleSource}
-  `
+  const styleSource = getFixedStylesSource()
+
+  return `${source}\n${styleSource}\n`
 }
 
 /**
@@ -103,74 +92,34 @@ function parseObject(source) {
 }
 
 /**
- * Splits a style at a path between the properties that are serializable and the one that access variables
- */
-
-function splitStyles(path) {
-  const parsed = []
-  const notParsed = []
-
-  path.node.properties.forEach(property => {
-    if (property.value.type === 'Literal') {
-      parsed.push(property)
-    } else {
-      try {
-        eval(j(property.value).toSource())
-        parsed.push(property)
-      } catch (err) {
-        notParsed.push(property)
-      }
-    }
-  })
-
-  return {
-    parsed: j.objectExpression(parsed),
-    notParsed: j.objectExpression(notParsed),
-  }
-}
-
-/**
- *
- * @param {*} path
- * @param {*} jsxNode
- */
-
-function modifyStyle(objPath, styles) {
-  const parentType = objPath.parent.value.type
-
-  if (parentType === 'ArrayExpression') {
-    const [first, ...rest] = styles
-    j(objPath).replaceWith(first)
-    objPath.parent.value.elements.concat(rest)
-  } else {
-    const styleArray = j.arrayExpression(styles)
-    j(objPath).replaceWith(styleArray)
-  }
-}
-
-/**
  * Save a reference and metadata for a given style
  */
 
-function saveRef(path, jsxNode) {
-  const nodeName = jsxNode.value.name.name
-  const styleSource = j(path).toSource()
-  const styleObj = parseObject(styleSource)
-  const ref = hash(styleObj)
+function saveRef(path) {
+  const openingElement = j(path)
+    .closest(j.JSXOpeningElement)
+    .get(0)
+  const nodeName = openingElement.node.name.name
 
-  if (!objects[ref]) {
-    objects[ref] = {
-      ref,
-      style: styleObj,
-      source: styleSource,
-      nodeName,
-      count: 1,
+  try {
+    const styleSource = j(path).toSource()
+    const styleObj = parseObject(styleSource)
+    const ref = hash(styleObj)
+
+    if (!objects[ref]) {
+      objects[ref] = {
+        ref,
+        style: styleObj,
+        source: styleSource,
+        nodeName,
+        count: 1,
+      }
+    } else {
+      objects[ref].count++
     }
-  } else {
-    objects[ref].count++
-  }
 
-  return ref
+    return ref
+  } catch (err) {}
 }
 
 /**
@@ -180,15 +129,6 @@ function saveRef(path, jsxNode) {
 function getRef(styleSource) {
   const styleObj = parseObject(styleSource)
   return hash(styleObj)
-}
-
-/**
- * Check if a node is a style attribute
- */
-
-function isStyleAttribute(path) {
-  const attrName = path.value.name.name
-  return attrName === 'style'
 }
 
 /**
@@ -232,3 +172,123 @@ function getFixedStylesSource() {
     trailingComma: 'es5',
   })
 }
+
+/**
+ *
+ */
+
+function splitStyleExpression(path) {
+  const styles = path.node.expression
+  const isArray = styles.type === 'ArrayExpression'
+  const isObject = styles.type === 'ObjectExpression'
+
+  let newStyles = []
+  if (isArray) {
+    newStyles = _.flatten(styles.elements.map(splitStyleObject))
+  } else if (isObject) {
+    newStyles = splitStyleObject(styles)
+  } else {
+    return
+  }
+
+  const count = newStyles.length
+
+  let replaceContent
+  if (count > 1) {
+    replaceContent = j.arrayExpression(newStyles)
+  } else if (count === 1) {
+    replaceContent = newStyles[0]
+  }
+
+  if (!replaceContent) {
+    return
+  }
+
+  j(path)
+    .find(isArray ? j.ArrayExpression : j.ObjectExpression)
+    .filter(isJSXExpressionContent)
+    .replaceWith(replaceContent)
+}
+
+/**
+ * Splits a style at a path between the properties that are serializable
+ * and the one that access variables
+ */
+
+function splitStyleObject(node) {
+  const clean = []
+  const dirty = []
+  const conditions = []
+
+  const { properties } = node
+
+  if (node.type !== 'ObjectExpression') {
+    return [node]
+  }
+
+  for (let property of properties) {
+    const {
+      key,
+      value: { type },
+    } = property
+
+    switch (type) {
+      case 'Literal':
+        clean.push(property)
+        break
+      case 'ConditionalExpression':
+        const cond = parseCondition(property)
+        if (cond) {
+          conditions.push(cond)
+          break
+        }
+      default:
+        dirty.push(property)
+    }
+  }
+
+  return [
+    !_.isEmpty(clean) && j.objectExpression(clean),
+    ...conditions,
+    !_.isEmpty(dirty) && j.objectExpression(dirty),
+  ].filter(v => v)
+}
+
+/**
+ *
+ * @param {*} path
+ */
+
+const hasStyleParent = path => {
+  try {
+    const isStyle = path.parent.node.name.name === 'style'
+    return isStyle
+  } catch (err) {
+    return false
+  }
+}
+
+/**
+ *
+ * @param {*} property
+ */
+
+function parseCondition(property) {
+  const { key, value } = property
+  const { test, consequent, alternate } = value
+  const isValidCond = consequent.type === 'Literal' || alternate.type === 'Literal'
+
+  if (!isValidCond) {
+    return null
+  }
+
+  const cq = j.objectExpression([j.property('init', key, consequent)])
+  const al = j.objectExpression([j.property('init', key, alternate)])
+  return j.conditionalExpression(test, cq, al)
+}
+
+/**
+ * j
+ */
+
+const isJSXExpressionContent = path => path.parent.value.type === 'JSXExpressionContainer'
