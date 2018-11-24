@@ -15,7 +15,7 @@ let j
 
 const objects = {}
 const finalStyles = {}
-const usedIdsByElement = {}
+const usedStylesByName = {}
 
 /**
  * Constants
@@ -37,39 +37,23 @@ module.exports = function(file, api) {
   root
     .find(j.VariableDeclarator)
     .find(j.Identifier, { name: 'fixedStyles' })
-    .forEach(path => {
-      const declaration = path.parent
+    .forEach(savedAlreadyFixedStyles)
 
-      const fixedStylePath = j(path.parent).find(j.ObjectExpression)
-
-      if (fixedStylePath.length === 0) {
-        return
-      }
-
-      const styles = fixedStylePath.get()
-
-      styles.node.properties.forEach(property => {
-        const styleSource = j(property.value).toSource()
-        saveRefFromStyle(styleSource, { id: property.key.name })
-      })
-    })
-
-  // Remove old fixed styles
+  // Remove already fixed styles in order to re-generate them
   root
     .find(j.VariableDeclarator)
     .find(j.Identifier, { name: 'fixedStyles' })
     .closest(j.VariableDeclaration)
     .remove()
 
-  // Split styles
-  source = root
+  // Split clean and dirty styles
+  root
     .find(j.JSXExpressionContainer)
     .filter(hasStyleParent)
     .forEach(splitStyleExpression)
-    .toSource()
 
-  // Save references
-  source = j(source)
+  // Save references from clean styles
+  root
     .find(j.JSXExpressionContainer)
     .filter(hasStyleParent)
     .find(j.ObjectExpression)
@@ -77,8 +61,8 @@ module.exports = function(file, api) {
     .forEach(saveRefFromPath)
     .toSource()
 
-  // Fix styles
-  source = j(source)
+  // Replace clean styles with stylesheet references
+  source = root
     .find(j.JSXExpressionContainer)
     .filter(hasStyleParent)
     .find(j.ObjectExpression)
@@ -105,11 +89,11 @@ function generateStyleId(data) {
   const common = count > 1
   const name = naming.generateStyleName(data)
 
-  if (!usedIdsByElement[name]) {
-    usedIdsByElement[name] = 0
+  if (!usedStylesByName[name]) {
+    usedStylesByName[name] = 0
   }
 
-  const nextIdIndex = ++usedIdsByElement[name]
+  const nextIdIndex = ++usedStylesByName[name]
   const generatedId = `${name}${nextIdIndex === 1 ? '' : nextIdIndex - 1}`
 
   while (finalStyles[generatedId]) {
@@ -142,7 +126,7 @@ function saveRefFromPath(path) {
 }
 
 /**
- * @param {*} styleSource
+ * Saves a reference for a processed clean style
  */
 
 function saveRefFromStyle(styleSource, { openingElementName, id }) {
@@ -181,16 +165,6 @@ function getRef(styleSource) {
 }
 
 /**
- * Check if an object is nested within another object
- */
-
-function isFirstLevelObject(path) {
-  const parentType = path.parent.value.type
-
-  return parentType !== 'Property'
-}
-
-/**
  * Apply the fix to a style at a path
  */
 
@@ -209,7 +183,7 @@ function fixStyle(path) {
 }
 
 /**
- *
+ * Adds a style to the final fixed styles object
  */
 
 function addFinalStyle(id, styleObj) {
@@ -231,7 +205,7 @@ function getFixedStylesSource() {
 }
 
 /**
- *
+ * Splits the inner styles of a style expression into clean and dirty styles
  */
 
 function splitStyleExpression(path) {
@@ -312,22 +286,28 @@ function splitStyleObject(node) {
 }
 
 /**
- *
- * @param {*} path
+ * Saves fixed styles that existed before running this transform
  */
 
-const hasStyleParent = path => {
-  try {
-    const isStyle = path.parent.node.name.name === 'style'
-    return isStyle
-  } catch (err) {
-    return false
+function savedAlreadyFixedStyles(path) {
+  const declaration = path.parent
+  const fixedStylePath = j(path.parent).find(j.ObjectExpression)
+
+  if (fixedStylePath.length === 0) {
+    return
   }
+
+  const styles = fixedStylePath.get()
+
+  styles.node.properties.forEach(property => {
+    const styleSource = j(property.value).toSource()
+    saveRefFromStyle(styleSource, { id: property.key.name })
+  })
 }
 
 /**
- *
- * @param {*} property
+ * Receives a property with a conditional expression inside and converts it
+ * into a conditional expression which return style objects
  */
 
 function parseCondition(property) {
@@ -345,7 +325,9 @@ function parseCondition(property) {
 }
 
 /**
- * j
+ * Filters
  */
 
-const isJSXExpressionContent = path => path.parent.value.type === 'JSXExpressionContainer'
+const hasStyleParent = path => _.get(path, 'parent.node.name.name') === 'style'
+const isFirstLevelObject = path => _.get(path, 'parent.value.type') !== 'Property'
+const isJSXExpressionContent = path => _.get(path, 'parent.value.type') === 'JSXExpressionContainer'
