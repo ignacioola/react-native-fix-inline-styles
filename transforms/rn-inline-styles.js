@@ -1,6 +1,7 @@
 const hash = require('object-hash')
 const prettier = require('prettier')
 const _ = require('lodash')
+const naming = require('../lib/naming')
 
 /**
  * Global ref
@@ -13,9 +14,8 @@ let j
  */
 
 const objects = {}
-const styleIds = {}
 const finalStyles = {}
-const usedIdsByNode = {}
+const usedIdsByElement = {}
 
 /**
  * Constants
@@ -31,8 +31,38 @@ module.exports = function(file, api) {
   j = api.jscodeshift
   let source
 
+  const root = j(file.source)
+
+  // Save already fixed styles
+  root
+    .find(j.VariableDeclarator)
+    .find(j.Identifier, { name: 'fixedStyles' })
+    .forEach(path => {
+      const declaration = path.parent
+
+      const fixedStylePath = j(path.parent).find(j.ObjectExpression)
+
+      if (fixedStylePath.length === 0) {
+        return
+      }
+
+      const styles = fixedStylePath.get()
+
+      styles.node.properties.forEach(property => {
+        const styleSource = j(property.value).toSource()
+        saveRefFromStyle(styleSource, { id: property.key.name })
+      })
+    })
+
+  // Remove old fixed styles
+  root
+    .find(j.VariableDeclarator)
+    .find(j.Identifier, { name: 'fixedStyles' })
+    .closest(j.VariableDeclaration)
+    .remove()
+
   // Split styles
-  source = j(file.source)
+  source = root
     .find(j.JSXExpressionContainer)
     .filter(hasStyleParent)
     .forEach(splitStyleExpression)
@@ -44,7 +74,7 @@ module.exports = function(file, api) {
     .filter(hasStyleParent)
     .find(j.ObjectExpression)
     .filter(isFirstLevelObject)
-    .forEach(saveRef)
+    .forEach(saveRefFromPath)
     .toSource()
 
   // Fix styles
@@ -65,22 +95,28 @@ module.exports = function(file, api) {
  * Returns the id for a style
  */
 
-function getStyleId(data) {
-  const { ref, nodeName, count } = data
-  const reused = count > 1
-  const name = _.camelCase(nodeName || 'node') + (reused ? 'Common' : '')
+function generateStyleId(data) {
+  const { count, id } = data
 
-  if (!usedIdsByNode[name]) {
-    usedIdsByNode[name] = 0
+  if (id != null) {
+    return id
   }
 
-  usedIdsByNode[name]++
+  const common = count > 1
+  const name = naming.generateStyleName(data)
 
-  const nextIdIndex = usedIdsByNode[name]
-  const commonCount = reused ? `_x${count}` : ''
-  const id = `${name}${nextIdIndex}${commonCount}`
+  if (!usedIdsByElement[name]) {
+    usedIdsByElement[name] = 0
+  }
 
-  return id
+  const nextIdIndex = ++usedIdsByElement[name]
+  const generatedId = `${name}${nextIdIndex === 1 ? '' : nextIdIndex - 1}`
+
+  while (finalStyles[generatedId]) {
+    return generateStyleId(data)
+  }
+
+  return generatedId
 }
 
 /**
@@ -95,14 +131,22 @@ function parseObject(source) {
  * Save a reference and metadata for a given style
  */
 
-function saveRef(path) {
+function saveRefFromPath(path) {
   const openingElement = j(path)
     .closest(j.JSXOpeningElement)
     .get(0)
-  const nodeName = openingElement.node.name.name
+  const openingElementName = openingElement.node.name.name
 
+  const styleSource = j(path).toSource()
+  saveRefFromStyle(styleSource, { openingElementName })
+}
+
+/**
+ * @param {*} styleSource
+ */
+
+function saveRefFromStyle(styleSource, { openingElementName, id }) {
   try {
-    const styleSource = j(path).toSource()
     const styleObj = parseObject(styleSource)
     const ref = hash(styleObj)
 
@@ -111,11 +155,16 @@ function saveRef(path) {
         ref,
         style: styleObj,
         source: styleSource,
-        nodeName,
+        openingElementName,
+        id,
         count: 1,
       }
     } else {
       objects[ref].count++
+    }
+
+    if (id != null) {
+      addFinalStyle(id, styleObj)
     }
 
     return ref
@@ -151,12 +200,20 @@ function fixStyle(path) {
   try {
     const ref = getRef(styleSource)
     const data = objects[ref]
-    const id = getStyleId(data)
+    const id = generateStyleId(data)
     data.id = id
-    finalStyles[id] = data.style
+    addFinalStyle(id, data.style)
 
     j(path).replaceWith(j.identifier(`${STYLES_OBJECT_VAR_NAME}.${id}`))
   } catch (err) {}
+}
+
+/**
+ *
+ */
+
+function addFinalStyle(id, styleObj) {
+  finalStyles[id] = styleObj
 }
 
 /**
