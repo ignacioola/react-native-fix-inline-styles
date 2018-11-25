@@ -7,11 +7,6 @@
     "es6": true,
     "jest": true
   },
-  "settings": {
-    "react": {
-      "version": "16.0"
-    }
-  },
   "rules": {
     "prettier/prettier": [
       "error",
