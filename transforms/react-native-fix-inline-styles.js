@@ -13,7 +13,7 @@ let j
  * Stored info
  */
 
-const objects = {}
+const styleInfo = {}
 const finalStyles = {}
 const usedStylesByName = {}
 
@@ -29,7 +29,6 @@ const STYLES_OBJECT_VAR_NAME = 'fixedStyles'
 
 module.exports = function(file, api) {
   j = api.jscodeshift
-  let source
 
   const root = j(file.source)
 
@@ -62,17 +61,16 @@ module.exports = function(file, api) {
     .toSource()
 
   // Replace clean styles with stylesheet references
-  source = root
+  root
     .find(j.JSXExpressionContainer)
     .filter(hasStyleParent)
     .find(j.ObjectExpression)
     .filter(isFirstLevelObject)
     .forEach(fixStyle)
-    .toSource()
 
   const styleSource = getFixedStylesSource()
 
-  return `${source}\n${styleSource}\n`
+  return `${root.toSource()}\n${styleSource}\n`
 }
 
 /**
@@ -80,13 +78,12 @@ module.exports = function(file, api) {
  */
 
 function generateStyleId(data) {
-  const { count, id } = data
+  const { id } = data
 
   if (id != null) {
     return id
   }
 
-  const common = count > 1
   const name = naming.generateStyleName(data)
 
   if (!usedStylesByName[name]) {
@@ -134,17 +131,17 @@ function saveRefFromStyle(styleSource, { openingElementName, id }) {
     const styleObj = parseObject(styleSource)
     const ref = hash(styleObj)
 
-    if (!objects[ref]) {
-      objects[ref] = {
+    if (!styleInfo[ref]) {
+      styleInfo[ref] = {
+        id,
         ref,
         style: styleObj,
         source: styleSource,
         openingElementName,
-        id,
         count: 1,
       }
     } else {
-      objects[ref].count++
+      styleInfo[ref].count++
     }
 
     if (id != null) {
@@ -152,7 +149,9 @@ function saveRefFromStyle(styleSource, { openingElementName, id }) {
     }
 
     return ref
-  } catch (err) {}
+  } catch (err) {
+    // Error parsing object (dirty)
+  }
 }
 
 /**
@@ -173,13 +172,15 @@ function fixStyle(path) {
 
   try {
     const ref = getRef(styleSource)
-    const data = objects[ref]
+    const data = styleInfo[ref]
     const id = generateStyleId(data)
     data.id = id
     addFinalStyle(id, data.style)
 
     j(path).replaceWith(j.identifier(`${STYLES_OBJECT_VAR_NAME}.${id}`))
-  } catch (err) {}
+  } catch (err) {
+    // Error parsing object (dirty)
+  }
 }
 
 /**
@@ -197,11 +198,14 @@ function addFinalStyle(id, styleObj) {
 function getFixedStylesSource() {
   const styles = JSON.stringify(finalStyles, null, 2)
 
-  return prettier.format(`const ${STYLES_OBJECT_VAR_NAME} = StyleSheet.create(${styles})`, {
-    parser: 'babylon',
-    singleQuote: true,
-    trailingComma: 'es5',
-  })
+  return prettier.format(
+    `const ${STYLES_OBJECT_VAR_NAME} = StyleSheet.create(${styles})`,
+    {
+      parser: 'babylon',
+      singleQuote: true,
+      trailingComma: 'es5',
+    }
+  )
 }
 
 /**
@@ -258,21 +262,20 @@ function splitStyleObject(node) {
   }
 
   for (let property of properties) {
-    const {
-      key,
-      value: { type },
-    } = property
+    let cond
+    const { value } = property
 
-    switch (type) {
+    switch (value.type) {
       case 'Literal':
         clean.push(property)
         break
       case 'ConditionalExpression':
-        const cond = parseCondition(property)
+        cond = parseCondition(property)
         if (cond) {
           conditions.push(cond)
           break
         }
+      // eslint-disable-next-line no-fallthrough
       default:
         dirty.push(property)
     }
@@ -290,7 +293,6 @@ function splitStyleObject(node) {
  */
 
 function savedAlreadyFixedStyles(path) {
-  const declaration = path.parent
   const fixedStylePath = j(path.parent).find(j.ObjectExpression)
 
   if (fixedStylePath.length === 0) {
@@ -313,7 +315,8 @@ function savedAlreadyFixedStyles(path) {
 function parseCondition(property) {
   const { key, value } = property
   const { test, consequent, alternate } = value
-  const isValidCond = consequent.type === 'Literal' || alternate.type === 'Literal'
+  const isValidCond =
+    consequent.type === 'Literal' || alternate.type === 'Literal'
 
   if (!isValidCond) {
     return null
@@ -329,5 +332,7 @@ function parseCondition(property) {
  */
 
 const hasStyleParent = path => _.get(path, 'parent.node.name.name') === 'style'
-const isFirstLevelObject = path => _.get(path, 'parent.value.type') !== 'Property'
-const isJSXExpressionContent = path => _.get(path, 'parent.value.type') === 'JSXExpressionContainer'
+const isFirstLevelObject = path =>
+  _.get(path, 'parent.value.type') !== 'Property'
+const isJSXExpressionContent = path =>
+  _.get(path, 'parent.value.type') === 'JSXExpressionContainer'
