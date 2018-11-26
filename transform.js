@@ -1,7 +1,7 @@
 const hash = require('object-hash')
 const prettier = require('prettier')
 const _ = require('lodash')
-const naming = require('../lib/naming')
+const naming = require('./lib/naming')
 
 /**
  * Global ref
@@ -135,13 +135,16 @@ function saveRefFromStyle(styleSource, { openingElementName, id }) {
       styleInfo[ref] = {
         id,
         ref,
+        count: 1,
         style: styleObj,
         source: styleSource,
-        openingElementName,
-        count: 1,
+        openingElements: {},
       }
+      styleInfo[ref].openingElements[openingElementName] = 1
     } else {
       styleInfo[ref].count++
+      styleInfo[ref].openingElements[openingElementName] =
+        ++styleInfo[ref].openingElements[openingElementName] || 1
     }
 
     if (id != null) {
