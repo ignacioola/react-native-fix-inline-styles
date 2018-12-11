@@ -35,13 +35,13 @@ module.exports = function(file, api) {
   // Save already fixed styles
   root
     .find(j.VariableDeclarator)
-    .find(j.Identifier, { name: 'fixedStyles' })
+    .find(j.Identifier, { name: STYLES_OBJECT_VAR_NAME })
     .forEach(savedAlreadyFixedStyles)
 
   // Remove already fixed styles in order to re-generate them
   root
     .find(j.VariableDeclarator)
-    .find(j.Identifier, { name: 'fixedStyles' })
+    .find(j.Identifier, { name: STYLES_OBJECT_VAR_NAME })
     .closest(j.VariableDeclaration)
     .remove()
 
